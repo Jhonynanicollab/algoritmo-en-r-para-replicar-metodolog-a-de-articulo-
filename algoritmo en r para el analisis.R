@@ -1,4 +1,4 @@
-
+##################################################################################
 proj_sf_path <- tryCatch(system.file("proj", package = "sf"), error = function(e) "")
 gdal_sf_path <- tryCatch(system.file("gdal", package = "sf"), error = function(e) "")
 
@@ -11,13 +11,13 @@ if (nzchar(gdal_sf_path)) {
 }
 
 
-
 ruta_actual    <- Sys.getenv("PATH")
 partes         <- strsplit(ruta_actual, ";")[[1]]
 partes_limpias <- partes[!grepl("PostgreSQL", partes, ignore.case = TRUE)]
 Sys.setenv(PATH = paste(partes_limpias, collapse = ";"))
+##################################################################################
 
-
+#EJECUTAR DESDE AQUI
 
 library(shiny)
 library(leaflet)
@@ -31,8 +31,7 @@ library(classInt)
 library(RColorBrewer)
 
 
-
-RUTA_POR_DEFECTO <- "E:/trabajo grupal fredd/bancos_juliaca/RENIPRESS_30-04-2026.csv"  # busca este archivo junto al script
+RUTA_POR_DEFECTO <- "RENIPRESS_30-04-2026.csv"   # busca este archivo junto al script
 CRS_UTM  <- "EPSG:32719"   # UTM WGS84 zona 19 Sur (igual que el paper)
 CRS_WGS  <- "EPSG:4326"
 
@@ -69,7 +68,7 @@ limpiar_datos <- function(datos_raw) {
     filter(!is.na(NORTE), !is.na(ESTE)) %>%
     distinct(NOMBRE, NORTE, ESTE, .keep_all = TRUE)
   
-
+ 
   mad_lat <- mad(datos$NORTE, constant = 1.4826)
   mad_lon <- mad(datos$ESTE, constant = 1.4826)
   z_lat <- if (mad_lat > 0) abs(datos$NORTE - median(datos$NORTE)) / mad_lat else 0
@@ -92,7 +91,8 @@ limpiar_datos <- function(datos_raw) {
   datos %>% mutate(TIPO_EQUIP = clasificar_tipo(CLASIFICACION))
 }
 
-
+# ---- Ancho de banda (fórmula del paper, regla de Silverman/ESRI) ----------
+#   SR = 0.9 * min(SD, sqrt(1/ln(2)) * Dm) * n^(-0.2)
 calcular_SR <- function(coords) {
   n    <- nrow(coords)
   xbar <- mean(coords[, 1]); ybar <- mean(coords[, 2])
@@ -102,7 +102,55 @@ calcular_SR <- function(coords) {
   0.9 * min(SD, sqrt(1 / log(2)) * Dm) * n^(-0.2)
 }
 
+# ---- Densidad de Kernel por categoría -> mapa parcial (raster) ------------
+generar_raster_densidad <- function(puntos_utm, tipo, ventana, resolucion) {
+  sub <- puntos_utm %>% filter(TIPO_EQUIP == tipo)
+  if (nrow(sub) < 2) {
+    showNotification(paste0("'", tipo, "' tiene menos de 2 puntos: se omite del análisis."),
+                     type = "warning", duration = 8)
+    return(NULL)
+  }
+  coords <- st_coordinates(sub)
+  SR   <- calcular_SR(coords)
+  pp   <- ppp(coords[, 1], coords[, 2], window = ventana)
+  dens <- density.ppp(pp, sigma = SR, eps = resolucion)
+  r <- raster(dens)
+  crs(r) <- CRS_UTM
+  r
+}
 
+
+reclasificar_raster <- function(r, n_clases = 5) {
+  if (is.null(r)) return(NULL)
+  vals <- values(r)
+  vals <- vals[!is.na(vals)]
+  if (length(vals) == 0) return(NULL)
+  
+  obtener_brks <- function(style) {
+    brks <- tryCatch(
+      classIntervals(vals, n = n_clases, style = style)$brks,
+      error = function(e) NULL
+    )
+    if (!is.null(brks)) brks <- unique(brks)
+    brks
+  }
+  
+  brks <- obtener_brks("quantile")
+  if (is.null(brks) || length(brks) < 3) brks <- obtener_brks("equal")
+  
+  if (is.null(brks) || length(brks) < 3) {
+    # No hay variabilidad suficiente: todo el raster va a una sola clase (3 = moderado)
+    r_out <- r; values(r_out) <- ifelse(is.na(values(r)), NA, 3)
+    return(r_out)
+  }
+  
+  n_reales <- length(brks) - 1
+  brks[1] <- -Inf; brks[length(brks)] <- Inf
+  m <- matrix(c(brks[-length(brks)], brks[-1], seq_len(n_reales)), ncol = 3)
+  reclassify(r, m, include.lowest = TRUE)
+}
+
+# ---- Pipeline completo: de datos limpios a mapa de riesgo final -----------
 calcular_riesgo <- function(datos_limpios, buffer_m, resolucion) {
   
   puntos_sf  <- st_as_sf(datos_limpios, coords = c("ESTE", "NORTE"), crs = 4326)
@@ -144,7 +192,7 @@ calcular_riesgo <- function(datos_limpios, buffer_m, resolucion) {
     projectRaster(r, crs = CRS_WGS, method = "ngb")
   })
   
-
+ 
   area_estudio_wgs <- st_transform(area_estudio_sf, crs = CRS_WGS)
   bbox_estudio <- st_bbox(area_estudio_wgs)
   
@@ -202,9 +250,10 @@ ui <- fluidPage(
   )
 )
 
+
 server <- function(input, output, session) {
   
-
+  # ---- Fuente de datos: archivo subido o archivo por defecto ----
   datos_raw <- reactive({
     if (!is.null(input$archivo)) {
       read_delim(input$archivo$datapath, delim = ";",
@@ -221,7 +270,7 @@ server <- function(input, output, session) {
     limpiar_datos(datos_raw())
   })
   
-
+  # ---- Recalcula solo al presionar el botón (o en la primera carga) -------
   resultado <- eventReactive(list(input$recalcular, datos_limpios()), {
     withProgress(message = "Calculando densidad de Kernel y zonas de riesgo...", {
       calcular_riesgo(datos_limpios(), input$buffer, input$resolucion)
