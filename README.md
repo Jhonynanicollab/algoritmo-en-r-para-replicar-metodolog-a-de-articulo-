@@ -1,0 +1,1 @@
+# algoritmo-en-r-para-replicar-metodolog-a-de-articulo-
